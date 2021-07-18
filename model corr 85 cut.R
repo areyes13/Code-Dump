@@ -156,8 +156,36 @@ corr_DROP %>%
   cat()
 sink()
 
-corr.CNDP %>%
+corr.CNDPtarget <- corr.CNDP %>%
   focus(TARGET_10A00) %>%
   filter(!term %in% corr_DROP) %>%
-  mutate(CHECK_FLAG = abs(TARGET_10A00) <= .0025) %>%
-  View()
+  mutate(absCorr = abs(TARGET_10A00)) 
+
+save(corr.CNDPtarget, file = 'CNDP Target corr.RData')
+
+
+
+# MULTI TARGET CORR TBL ---------------------------------------------------
+# DO A CORR TABLE FOR ALL THE BINARY TARGETS
+# WE CAN MAP BACK TO BORUTA OUTPUTS TO HELP DECIDE WHICH FEATURES TO KEEP
+# SO WE DON'T JUST SELECT BASED ON CDNP ACCURACY
+
+target_df <- input_master %>%
+  # SELECT SINGLE BINARY TARGET (START WITH CNDP 10A00)
+  select(-UT_LVL_10_CD, -UT_LVL_10_DSCR, -DV_IS_OPEN_x, -DV_IS_OPEN_y, 
+         -BUS_AREA_ID, -RS_MATCH_FLAG, -EXT_DTL_REVN_USD,
+         -INDEX, -P_SCORE_NEW_FLAG, -NEWCO_FLG_BASE) %>%
+  select(!any_of(corr_DROP), corr_DROP[str_detect(corr_DROP, 'COMP_INST')])
+
+
+corr.TARGETS <- target_df %>%
+  select(-INBOUND_MARKETING_INTERACTION_KEY) %>%
+  select_if(is.numeric) %>%
+  correlate()
+
+
+corr.TARGETS.df <- corr.TARGETS %>%
+  focus(starts_with('TARGET_10'))
+
+save(corr.TARGETS, corr.TARGETS.df, file = 'corr TARGETS.RData')
+

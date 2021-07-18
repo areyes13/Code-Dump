@@ -21,6 +21,8 @@ load("~/Documents/Projects/MQL Modeling/UT10 Model/UT10 prep and feature select.
 
 # load("~/R Files/MQL Feature Selection/UT10 prep and feature select.RData")
 # load("~/R Files/MQL Feature Selection/UT10 prep and feature select - PRE RFE.RData")
+# load("~/R Files/MQL Feature Selection/CORR DROP.RData")
+# load("~/R Files/MQL Feature Selection/chonker.RData")
 
 # LOAD MODELING DATA ------------------------------------------------------
 
@@ -347,6 +349,129 @@ attStats(boruta_CNDP_cat) %>%
 plot(boruta_CNDP_cat)
 
 
+# chunk up features **** -------------------------------------------------------
+# already running cats + FLG fields
+
+chonker <- tibble(FIELD = input %>%
+                    select(!any_of(corr_DROP), corr_DROP[str_detect(corr_DROP, 'COMP_INST')]) %>%
+                    select(!any_of(cat_names)) %>%
+                    select(!ends_with('_FLG')) %>%
+                    select(-DV_IS_OPEN_x, -DV_IS_OPEN_y, -BUS_AREA_ID, -RS_MATCH_FLAG, -EXT_DTL_REVN_USD,
+                           -INDEX, -P_SCORE_NEW_FLAG, -NEWCO_FLG_BASE) %>%
+                    names) %>%
+  filter(!FIELD %in% c('TARGET_10A00', 'INBOUND_MARKETING_INTERACTION_KEY')) %>%
+  mutate(type = case_when(FIELD %>% str_detect('INDIV_SUM_I') ~ 'PIPE INDIV',
+                          FIELD %>% str_detect('INDIV_YIELD_I') ~ 'PIPE INDIV',
+                          FIELD %>% str_detect('COMP_SUM_C') ~ 'PIPE COMP',
+                          FIELD %>% str_detect('COMP_YIELD_C') ~ 'PIPE COMP',
+                          FIELD %>% str_starts('INTR_') ~ 'INTR',
+                          FIELD %>% str_starts('PAG_') ~ 'WEB',
+                          FIELD %>% str_starts('PG') ~ 'WEB',
+                          FIELD %>% str_detect('_OFFER_') ~ 'OFFER',
+                          FIELD %>% str_starts('CHN_') ~ 'CHANNEL',
+                          FIELD %>% str_starts('BJ_') ~ 'BJ',
+                          FIELD %>% str_starts('UT10') ~ 'LAST TOUCH',
+                          FIELD %>% str_starts('COMP_INST') ~ 'COMP INST',
+                          T ~ 'OTHER')) %>%
+  arrange(type) %>%
+  group_by(index = (row_number()-1) %/% 100)
+
+save(chonker, file = 'chonker.RData')
+
+
+
+# BORUTA - CNDP NUM CHUNK 0 **** -----------------------------------------------
+x_train <- train %>%
+  select(TARGET_10A00, 
+         any_of(chonker %>% 
+                  filter(index == 0) %>%
+                  pull(FIELD)))
+
+boruta_CNDP_chunk0 <- Boruta(TARGET_10A00 ~ ., 
+                             data = x_train, 
+                             maxRuns = 11,
+                             doTrace = 2)
+
+# save(boruta_CNDP_chunk0, file = 'boruta chunk 0.RData')
+
+# BORUTA - CNDP NUM CHUNK 1 **** -----------------------------------------------
+x_train <- train %>%
+  select(TARGET_10A00, 
+         any_of(chonker %>% 
+                  filter(index == 1) %>%
+                  pull(FIELD)))
+
+boruta_CNDP_chunk1 <- Boruta(TARGET_10A00 ~ ., 
+                             data = x_train, 
+                             maxRuns = 11,
+                             doTrace = 2)
+
+save(boruta_CNDP_chunk1, file = 'boruta chunk 1.RData')
+
+# BORUTA - CNDP NUM CHUNK 2 **** -----------------------------------------------
+x_train <- train %>%
+  select(TARGET_10A00, 
+         any_of(chonker %>% 
+                  filter(index == 2) %>%
+                  pull(FIELD)))
+
+boruta_CNDP_chunk2 <- Boruta(TARGET_10A00 ~ ., 
+                             data = x_train, 
+                             maxRuns = 11,
+                             doTrace = 2)
+
+save(boruta_CNDP_chunk2, file = 'boruta chunk 2.RData')
+
+# BORUTA - CNDP NUM CHUNK 3 **** -----------------------------------------------
+x_train <- train %>%
+  select(TARGET_10A00, 
+         any_of(chonker %>% 
+                  filter(index == 3) %>%
+                  pull(FIELD)))
+
+boruta_CNDP_chunk3 <- Boruta(TARGET_10A00 ~ ., 
+                             data = x_train, 
+                             maxRuns = 11,
+                             doTrace = 3)
+
+save(boruta_CNDP_chunk3, file = 'boruta chunk 3.RData')
+
+# BORUTA - CNDP NUM CHUNK 3 **** -----------------------------------------------
+x_train <- train %>%
+  select(TARGET_10A00, 
+         any_of(chonker %>% 
+                  filter(index == 4) %>%
+                  pull(FIELD)))
+
+boruta_CNDP_chunk4 <- Boruta(TARGET_10A00 ~ ., 
+                             data = x_train, 
+                             maxRuns = 11,
+                             doTrace = 2)
+
+save(boruta_CNDP_chunk4, file = 'boruta chunk 4.RData')
+
+
+# Combined Table ----------------------------------------------------------
+
+chunk_stats_CNDP <-  bind_rows(attStats(boruta_CNDP_chunk0) %>%
+                                 mutate(FIELD = row.names(.)) %>%
+                                 as_tibble(),
+                               attStats(boruta_CNDP_chunk1) %>%
+                                 mutate(FIELD = row.names(.)) %>%
+                                 as_tibble(),
+                               attStats(boruta_CNDP_chunk2) %>%
+                                 mutate(FIELD = row.names(.)) %>%
+                                 as_tibble(),
+                               attStats(boruta_CNDP_chunk3) %>%
+                                 mutate(FIELD = row.names(.)) %>%
+                                 as_tibble(),
+                               attStats(boruta_CNDP_chunk4) %>%
+                                 mutate(FIELD = row.names(.)) %>%
+                                 as_tibble()) %>% 
+  left_join(chonker) %>%
+  arrange(-medianImp)
+
+save(chunk_stats_CNDP, file = 'chunk stats.RData')
 # TEMPLATE ----------------------------------------------------------------
 
 
