@@ -472,6 +472,52 @@ chunk_stats_CNDP <-  bind_rows(attStats(boruta_CNDP_chunk0) %>%
   arrange(-medianImp)
 
 save(chunk_stats_CNDP, file = 'chunk stats.RData')
+
+
+
+# FINAL BORUTA selection ***** ------------------------------------------------------
+# load("~/R Files/MQL Feature Selection/UT10 prep and feature select.RData")
+# rm(bin_ref, cat_cleaner, cat_final, control, df, dropper, input_master, jobs, lastTouch, test, train)
+# gc()
+
+terminator <- read_csv("feature elimination.txt") %>%
+  select(FIELD, FINAL)
+
+# need to set up table for multiclass boruta...
+# so get rid of binary targets in 'input' and map back in the original multiclass target
+# drop features that were eliminated in previous boruta rounds
+input_terminated <- input %>%
+  select(INBOUND_MARKETING_INTERACTION_KEY, 
+         all_of(terminator %>% 
+                  filter(FINAL == 'KEEP') %>%
+                  pull(FIELD))) %>%
+  left_join(data %>%
+              select(INBOUND_MARKETING_INTERACTION_KEY, UT_LVL_10_CD)) %>%
+  mutate(UT_LVL_10_CD = case_when(UT_LVL_10_CD %in% c('10G00', '10J00') ~ '10G00_10J00',
+                                  T ~ UT_LVL_10_CD),
+         UT_LVL_10_CD = as.factor(UT_LVL_10_CD)) %>%
+  select(INBOUND_MARKETING_INTERACTION_KEY, UT_LVL_10_CD, everything())
+
+# rm(list = setdiff(ls(), c('input_terminated', 'terminator')))
+
+
+boruta_FULL <- Boruta(UT_LVL_10_CD ~ ., 
+                      data = input_terminated %>%
+                        select(-INBOUND_MARKETING_INTERACTION_KEY), 
+                      maxRuns = 20,
+                      doTrace = 2)
+
+# save(boruta_FULL, file = 'boruta FULL output.RData')
+
+
+full_stats <- attStats(boruta_FULL) %>%
+  mutate(FIELD = row.names(.)) %>%
+  as_tibble() %>% 
+  left_join(chonker) %>%
+  arrange(type,-minImp) 
+
+# save(boruta_FULL, full_stats, file = 'boruta FULL output.RData')
+
 # TEMPLATE ----------------------------------------------------------------
 
 
