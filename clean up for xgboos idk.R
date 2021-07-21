@@ -1,6 +1,8 @@
 # Load Packages -----------------------------------------------------------
 # update to match your working directory (where you have saved your files)
 setwd('/Users/areyesm@us.ibm.com/Documents/Projects/MQL Modeling/UT10 Model')
+
+# setwd("~/R Files/MQL Feature Selection")
 # make sure you have these installed beforehand
 # you can run this in the console (no quotes): install.packages(LIBRARY_NAME)
 library(tidyverse)
@@ -14,26 +16,28 @@ library(randomForest)
 library(Boruta)
 library(ggthemes)
 
+# load("~/R Files/MQL Feature Selection/xgboost prep ws.RData")
+# load("~/R Files/MQL Feature Selection/bin ref.RData")
+# load("~/R Files/MQL Feature Selection/dropper.RData")
+
 # load 85% corr drop -------------------------------------------------------
 load("~/Documents/Projects/MQL Modeling/UT10 Model/CORR DROP.RData")
-
-# load data v2 from python ------------------------------------------------
-data <- read_csv("full ut10 modeling data v2.csv") %>%
-  select(!any_of(corr_DROP))
 
 # load job feature (leftover) ---------------------------------------------
 jobs <- read_csv('MQL_MODELING_MASTER_GATED_EMPL_FIELDS 20210713.csv') %>%
   mutate(JOB_CTGY_CD = coalesce(JOB_CTGY_CD, 'NULL'))
 
 
+# load data v2 from python ------------------------------------------------
+data <- read_csv("full ut10 modeling data v2.csv") %>%
+  select(!any_of(corr_DROP), corr_DROP[str_detect(corr_DROP, 'COMP_INST')]) %>%
+  select(!all_of(dropper)) %>%
+  inner_join(jobs)
+
+
 # load selected fields (from final boruta) --------------------------------
 selector_Final <- read_excel("Feature Elimination UT10.xlsx", 
-                       sheet = "BORUTA FINAL OUT")
-
-
-
-
-
+                             sheet = "BORUTA FINAL OUT")
 
 
 # 1.0) BINNING: REF TABLE --------------------------------------------
@@ -152,7 +156,7 @@ cat_keep <- data %>%
   select(INBOUND_MARKETING_INTERACTION_KEY, !any_of(bin_ref %>% pull(VAR))) %>%
   select(-UT_LVL_10_CD, -UT_LVL_10_DSCR) %>%
   mutate(across(where(is.character), ~ coalesce(.x, 'NULL')))
-  
+
 
 # 1.3) Create categorical encoded tbl -------------------------------------
 # join by INBOUND MARKETING KEY
@@ -183,13 +187,31 @@ cat_names <- cat_final %>%
   select(-INBOUND_MARKETING_INTERACTION_KEY) %>%
   names()
 
+# 1.4) create input table (version 1) -------------------------------------
+# vector of fields we want to replace with our new bins
+cat_cleaner <- tibble(FIELD = c(cat_keep %>% names, cat_box %>% names)) %>%
+  filter(FIELD != "INBOUND_MARKETING_INTERACTION_KEY") %>%
+  distinct() %>%
+  pull(FIELD) 
+
+# drop raw binned fields 
+# map in new bins!
+# use this for feature selection
+input_master <- data %>%
+  select(!all_of(cat_cleaner)) %>%
+  mutate(S1_CLIENT_TEAMS = coalesce(S1_CLIENT_TEAMS, "S2")) %>%
+  inner_join(cat_final) %>%
+  mutate(across(where(is.numeric), coalesce, -1)) 
+
+
+# rm(cat_box, cat_box_wide, cat_final, cat_keep, cat_keep_wide, jobs, data, bin_ref)
 
 # junk --------------------------------------------------------------------
 
 
-numInput <- data %>%
+input <- input_master %>%
   select(INBOUND_MARKETING_INTERACTION_KEY, 
-         any_of(selector_Final %>%
+         all_of(selector_Final %>%
                   filter(FINAL == 'KEEP') %>%
                   pull(FIELD)))
 
@@ -198,4 +220,3 @@ catInput <- data %>%
          JOB_FUNCTION, MARKET_INTERACTION, PARENT_ASSET_BUYERS_JOURNEY,
          UT_LVL_30_CD_INTENT_NEW, UT_LVL_20_CD_INTENT_NEW, UT_LVL_15_CD_INTENT_NEW,
          CHANNEL_NAME, CHANNEL_TYPE, IBM_GBL_IMT_DSCR, PROGRAM_NAME)
-
