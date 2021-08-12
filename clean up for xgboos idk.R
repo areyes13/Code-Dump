@@ -15,10 +15,8 @@ library(caret)
 library(randomForest)
 library(Boruta)
 library(ggthemes)
+library(DataExplorer)
 
-# load("~/R Files/MQL Feature Selection/xgboost prep ws.RData")
-# load("~/R Files/MQL Feature Selection/bin ref.RData")
-# load("~/R Files/MQL Feature Selection/dropper.RData")
 
 # load 85% corr drop -------------------------------------------------------
 load("~/Documents/Projects/MQL Modeling/UT10 Model/CORR DROP.RData")
@@ -27,18 +25,63 @@ load("~/Documents/Projects/MQL Modeling/UT10 Model/CORR DROP.RData")
 jobs <- read_csv('MQL_MODELING_MASTER_GATED_EMPL_FIELDS 20210713.csv') %>%
   mutate(JOB_CTGY_CD = coalesce(JOB_CTGY_CD, 'NULL'))
 
-
-# load data v2 from python ------------------------------------------------
-data <- read_csv("full ut10 modeling data v2.csv") %>%
-  select(!any_of(corr_DROP), corr_DROP[str_detect(corr_DROP, 'COMP_INST')]) %>%
-  select(!all_of(dropper)) %>%
-  inner_join(jobs)
-
+# DROP FIELDS WE WON'T NEED FOR MODELING ----------------------------------
+# FROM EXCEL WORKBOOK WITH BINS...
+dropper <- read_excel("~/Documents/Projects/MQL Routing/MQL MODEL - category binning summaries.xlsx", 
+                      sheet = "Modeling Base") %>%
+  filter(Include == 'F') %>%
+  pull(VARIABLES)
 
 # load selected fields (from final boruta) --------------------------------
+# updated with new v2 selection
 selector_Final <- read_excel("Feature Elimination UT10.xlsx", 
                              sheet = "BORUTA FINAL OUT")
 
+# load data v2 from python ------------------------------------------------
+# Some fields we want to force in (for now...)
+maintain <- c('COMP_INST', 'UT10_OFFER_CA_COMP_CNT_60DAYS', 'UT10_OFFER_CNDP_COMP_CNT_60DAYS', 
+              'UT10_OFFER_GTS_COMP_CNT_60DAYS', 'UT10_OFFER_SEC_COMP_CNT_60DAYS', 
+              'UT10_OFFER_SYSWT_COMP_CNT_60DAYS', 'UT10_OFFER_WH_COMP_CNT_60DAYS_FLG') %>%
+  paste(collapse = '|')
+
+# Raw data
+raw <- read_csv("full ut10 modeling data v2.csv") 
+
+
+# load same quarter pipe fix & objects ------------------------------------
+# load 'test_df' which has subtracted same quarter LEAD counts
+# load('RLM & Same Q Pipe Update.RData')
+# table of SAME QUARTER FIXED LEAD COUNTS
+# pipe_SUBBED <- test_df %>%
+#   ungroup() %>%
+#   select(-URN_IDM_INDIV, -URN_IDM_COMP, -YEAR_QUARTER) %>%
+#   select(INBOUND_MARKETING_INTERACTION_KEY,
+#          all_of(originalField[originalField %in% updatedField]))
+# 
+# rm(test_df)
+# 
+# RLM_opty <- RLM_opty$INBOUND_MARKETING_INTERACTION_KEY
+# 
+# save(pipe_SUBBED, RLM_opty, file = 'RLM & Same Q Pipe Update 2.RData')
+load('RLM & Same Q Pipe Update 2.RData')
+
+
+# load lagged pipe fields (new!) ------------------------------------------
+# this will now only have lagged Win Rev values 
+# (tossing out yields and LEAD counts since those are coming from other table)
+pipe_lag <- read_delim("~/Documents/Projects/MQL - NFS Transfers/MQL_MODELING_MASTER_GATED_BASE_PIPE_INRST_WEB_CI_LAG_POSITIVE", 
+                       "\t", escape_double = FALSE, trim_ws = TRUE) %>%
+  select(INBOUND_MARKETING_INTERACTION_KEY, S1_CLIENT_TEAMS, any_of(data %>% names())) %>%
+  select(INBOUND_MARKETING_INTERACTION_KEY, S1_CLIENT_TEAMS, contains("_COMP_"), contains("_INDIV_")) %>%
+  select(!starts_with('INTR')) %>%
+  select(INBOUND_MARKETING_INTERACTION_KEY, !contains('YIELD'), -S1_CLIENT_TEAMS) %>%
+  select(INBOUND_MARKETING_INTERACTION_KEY,
+         !any_of(updatedField))  %>%
+  mutate(INBOUND_MARKETING_INTERACTION_KEY = INBOUND_MARKETING_INTERACTION_KEY %>% as.character)
+
+# load missing ID fields... -----------------------------------------------
+# gotta get the URN and YQ fields to map in some of our new pipe delta fields
+id_fields <- read_csv('INBOUND ID FIELDS 20210729.csv')
 
 # 1.0) BINNING: REF TABLE --------------------------------------------
 # use the excel workbook where bins are already defined by conversion rates
@@ -55,49 +98,59 @@ bin_ref <- read_excel("~/Documents/Projects/MQL Routing/MQL MODEL - category bin
   group_by(VAR) %>%
   summarise(VAL = paste(VAL, collapse = ',\n'))
 
-# 1.1) BINNING: CATEGORICALS ----------------------------------------------
+bin_ref %>%
+  filter(VAR == 'INDUSTRY') %>%
+  pull(VAL) %>%
+  cat()
+
+# 1.1) BINNING - Function & Setup ----------------------------------------------
 # use bin_ref to bin certain categorical fields to simplify one-hot encoding
-# we will append this later to the main data set
-cat_box <- data %>%
-  select(INBOUND_MARKETING_INTERACTION_KEY, BUS_AREA_NAME, COMP_REV_SEG, EMP_CNT_SEG, INDUSTRY, 
-         JOB_FUNCTION, PARENT_ASSET_BUYERS_JOURNEY, # MARKET_INTERACTION,
-         UT_LVL_30_CD_INTENT_NEW, UT_LVL_20_CD_INTENT_NEW, UT_LVL_15_CD_INTENT_NEW,
-         CHANNEL_NAME, CHANNEL_TYPE, IBM_GBL_IMT_DSCR, PROGRAM_NAME) %>%
+
+# function to clean up bin names
+name_cleaner <- function(x) {
+  out <- str_replace_all(x, ' ', '_') %>%
+    toupper()
+  return(out)
+}
+
+# Function to bin numeric fields (NULL; 0; >= 1)
+binary_bin <- function(x) {
+  out <- case_when(x == -1 ~ 'NULL', 
+                   x == 0 ~ 'ZERO',
+                   T ~ '1PLUS')
+  return(out)
+} 
+
+
+# bin fields and then update using 'dummify' function
+# we can go ahead and drop fields that are just junk at the moment...
+# if needed go back and add them back in
+data <- raw %>%  
+  select(!any_of(corr_DROP), corr_DROP[str_detect(corr_DROP, maintain)]) %>%
+  select(!all_of(dropper)) %>%
+  inner_join(jobs) %>%
+  select(-COMP_REV_SEG, -EMP_CNT_SEG, -S1_CLIENT_TEAMS, 
+         -CHANNEL_NAME, -CHANNEL_TYPE, -UT_LVL_10_DSCR, -TYPE_FLG, -UT_LVL_10_CD,
+         -IND_SCORE_NEW, -DV_IS_OPEN_x, -DV_IS_OPEN_y) %>%
+  select(!contains('YIELD')) %>%
   mutate(BUS_AREA_NAME = case_when(BUS_AREA_NAME %in% c('Held at Top Expenses', 'Communications', 'Audience Innovation', 'Portfolio Security', 'Open Marketplace', 'Other', 'Building a Smarter Business', 'IBM Master Brand', 'US Federal', 'IBM Global Financing', 'Advertising', 'Industry Marketing', 'Audience Partner', 'Journey to Cloud') ~ 'BIN_A',
                                    BUS_AREA_NAME %in% c('Watson Health', 'AI Applications', 'Security', 'Expansion Marketing', 'Blockchain and Strategic Alliances', 'Systems', 'Global Business Services') ~ 'BIN_B',
                                    BUS_AREA_NAME %in% c('Global Technology Services', 'Acoustic', 'Partner Ecosystem', 'xIBM Events', 'Talent Solutions') ~ 'BIN_C',
                                    BUS_AREA_NAME %in% c('Cloud and Data Platform', 'Developer', 'Audience Developer', 'Watson Media and Weather', 'Geography-specific Industries') ~ 'BIN_D',
                                    BUS_AREA_NAME %>% is.na ~ 'UNKNOWN',
                                    T ~ "NULL"),
-         COMP_REV_SEG = case_when(COMP_REV_SEG %in% c('A: 0', 'B: $1 to $2.4k', 'C: $2.5k to $4.9k', 'D: $5k to $9.9k', 'E: $10k to $19.9k', 'F: $20k to $49.9k', 'G: $50k to $99.9k', 'H: $100k to $499.9k', 'I: $500k to $999.9k', 'J: $1mm to $4.9mm') ~ '[0,5M)',
-                                  COMP_REV_SEG %in% c('O: $100mm+') ~ '[100M,inf)',
-                                  COMP_REV_SEG %in% c('K: $5mm to $9.9mm', 'L: $10mm to $24.9mm', 'M: $25mm to $49.9mm', 'N: $50mm to $99.9mm') ~ '[5M, 100M)',
-                                  COMP_REV_SEG %>% is.na ~ 'UNKNOWN',
-                                  T ~ "NULL"),
-         EMP_CNT_SEG = case_when(EMP_CNT_SEG %in% c('A: 0', 'B: 1 to 99') ~ '[0,100)',
-                                 EMP_CNT_SEG %in% c('C: 100 to 999', 'D: 1k to 4.9k') ~ '[100,5k)',
-                                 EMP_CNT_SEG %in% c('G: 50k to 99.9k') ~ '[50k,inf)',
-                                 EMP_CNT_SEG %in% c('E: 5k to 9.9k', 'F: 10k to 49.9k') ~ '[5k,50k)',
-                                 EMP_CNT_SEG %in% c('H: 100k to 249.9k', 'I: 250k+') ~ 'BIN_A',
-                                 EMP_CNT_SEG %>% is.na ~ 'UNKNOWN',
-                                 T ~ "NULL"),
-         INDUSTRY = case_when(INDUSTRY %in% c('Energy & Utilities', 'Banking', 'Government, Central/Federal', 'Government, State/Provincial/Local', 'Consumer Products', 'Insurance', 'Travel & Transportation') ~ 'BIN_A',
-                              INDUSTRY %in% c('Chemicals & Petroleum', 'Aerospace & Defense', 'Automotive', 'Life Sciences', 'Financial Markets', 'Retail') ~ 'BIN_B',
-                              INDUSTRY %in% c('Industrial Products', 'Telecommunications', 'Healthcare', 'Electronics', 'Media & Entertainment', 'Wholesale Distribution & Services') ~ 'BIN_C',
-                              INDUSTRY %in% c('Computer Services', 'Professional Services', 'Exclusions', 'Education') ~ 'BIN_D',
-                              INDUSTRY %>% is.na ~ 'UNKNOWN',
-                              T ~ "NULL"),
+         INDUSTRY = case_when(INDUSTRY %in% c('Media & Entertainment', 'Professional Services', 'Wholesale Distribution & Services') ~ 'BIN_CGHJ',
+                              INDUSTRY %in% c('Consumer Products', 'Insurance', 'Retail') ~ 'BIN_FIN',
+                              INDUSTRY %in% c('Education', 'Exclusions', 'Unknown') ~ 'BIN_LOW',
+                              INDUSTRY %in% c('Banking', 'Energy & Utilities', 'Government, Central/Federal', 'Government, State/Provincial/Local') ~ 'BIN_NCA',
+                              INDUSTRY %in% c('Healthcare', 'Life Sciences') ~ 'BIN_WAT',
+                              T ~ "BIN_OTHER"),
          JOB_FUNCTION = case_when(JOB_FUNCTION %in% c('Transport & Travel Professions', 'Information Tech Professions', 'Govt & Civil Svc Professions', 'Retail/Wholesale and Services') ~ 'BIN_A',
                                   JOB_FUNCTION %in% c('Finance/Insurance Professions', 'Distribution/Storage/Logistics', 'Business Admin/Operations/Svcs') ~ 'BIN_B',
                                   JOB_FUNCTION %in% c('Sales and Marketing Professions', 'Processing/Manufac/Engineering', 'Life/Physical/Social Sciences', 'Health Discipline Professions', 'Executive Professions', 'Unknown', 'Legal Professions') ~ 'BIN_C',
                                   JOB_FUNCTION %in% c('Other', 'Educational Professions') ~ 'BIN_D',
                                   JOB_FUNCTION %>% is.na ~ 'UNKNOWN',
                                   T ~ "NULL"),
-         # MARKET_INTERACTION = case_when(MARKET_INTERACTION %in% c('EMSG') ~ 'EMSG',
-         #                                MARKET_INTERACTION %in% c('DISPLAY', 'EARNED', 'FACE-TO-FACE EVENT', 'OTHER', 'OWNED SOCIAL', 'SEARCH', 'CONTENT SYNDICATION', 'PAID SOCIAL', 'PRE-EVENT REGISTRATION / CONFIRMATION', 'WEBCAST', 'AFFILIATE', 'DIGITAL OTHER', 'LANDING PAGE') ~ 'RESP',
-         #                                MARKET_INTERACTION %>% is.na ~ "UNKNOWN", 
-         #                                T ~ "NULL"),
-         # MARKET_INTERACTION = ifelse(MARKET_INTERACTION == 'RESP', 1, 0),
          UT_LVL_30_CD_INTENT_NEW = case_when(UT_LVL_30_CD_INTENT_NEW %in% c('30A8K') ~ 'CLOUD PAK AUTOMATION',
                                              UT_LVL_30_CD_INTENT_NEW %in% c('30AHU', '30AXQ', '30AM2', '30AXT') ~ 'CLOUD PAK DATA',
                                              UT_LVL_30_CD_INTENT_NEW %in% c('30NEB') ~ 'CLOUD PAK SEC',
@@ -121,16 +174,6 @@ cat_box <- data %>%
                                              UT_LVL_15_CD_INTENT_NEW %in% c('15ANP', '153QH', '15JHO', '15CLV', '15INP', '15TSL', '15EDC') ~ 'BIN_C',
                                              UT_LVL_15_CD_INTENT_NEW %>% is.na() ~ 'UNKNOWN',
                                              T ~ 'OTHER'),
-         CHANNEL_NAME = case_when(CHANNEL_NAME %in% c('Digital Inbound') ~ 'DIGITAL INBOUND',
-                                  CHANNEL_NAME %in% c('Event') ~ 'EVENT',
-                                  CHANNEL_NAME %>% is.na() ~ 'NULL',
-                                  T ~ 'OTHER'),
-         CHANNEL_TYPE = case_when(CHANNEL_TYPE %in% c('Content Syndication') ~ 'CONT SYND',
-                                  CHANNEL_TYPE %in% c('Email') ~ 'EMAIL',
-                                  CHANNEL_TYPE %in% c('External-OB Telemarketing', 'External-Purchased') | is.na(CHANNEL_TYPE)  ~ 'EPEOS',
-                                  CHANNEL_TYPE %in% c('Other', 'Face to Face') ~ 'F2F OTH',
-                                  CHANNEL_TYPE %in% c('Hybrid', 'Virtual', 'Landing Page') ~ 'VR LP HYB',
-                                  T ~ 'F2F OTH'),
          IBM_GBL_IMT_DSCR = case_when(IBM_GBL_IMT_DSCR %in% c('DACH', 'Central/Eastern Europe', 'BeNeLux') ~ 'DACH EEUR BENELUX',
                                       IBM_GBL_IMT_DSCR %in% c('Italy Market', 'Nordic', 'France Market') ~ 'IT NORD FR',
                                       IBM_GBL_IMT_DSCR %in% c('Japan Market', 'India/South Asia', 'Korea Market') ~ 'JP IND KOR',
@@ -144,79 +187,116 @@ cat_box <- data %>%
                                   T ~ 'OTHER'),
          PARENT_ASSET_BUYERS_JOURNEY = case_when(PARENT_ASSET_BUYERS_JOURNEY %in% c('Adopt', 'Buy', 'Advocate') ~ 'BUY ADOPT ADVOCATE',
                                                  PARENT_ASSET_BUYERS_JOURNEY %>% is.na() ~ 'NULL',
-                                                 T ~ PARENT_ASSET_BUYERS_JOURNEY)) 
+                                                 T ~ PARENT_ASSET_BUYERS_JOURNEY)) %>%
+  rowwise() %>%
+  mutate(COMP_INST = sum(COMP_INST_FLG_MICROSOFT, COMP_INST_FLG_SAP, COMP_INST_FLG_HP, COMP_INST_FLG_ORACLE, 
+                         COMP_INST_FLG_DELL, COMP_INST_FLG_CISCO, COMP_INST_FLG_OPENSRC, COMP_INST_FLG_AMAZON, 
+                         COMP_INST_FLG_VMWARE, COMP_INST_FLG_GOOGLE, COMP_INST_FLG_IBM, COMP_INST_FLG_ADOBE, 
+                         COMP_INST_FLG_AUTODESK, COMP_INST_FLG_MICROFOCUS, COMP_INST_FLG_CITRIX, COMP_INST_FLG_WORDPRESS, 
+                         COMP_INST_FLG_SALESFORCE, COMP_INST_FLG_FB)) %>%
+  ungroup() %>%
+  mutate(COMP_INST = case_when(COMP_INST > 0 & COMP_INST <= 5 ~ '1TO5',
+                               COMP_INST >= 6 ~ '6PLUS',
+                               T ~ 'NULL')) %>%
+  select(!contains('COMP_INST'), COMP_INST) %>%
+  ungroup() %>%
+  # Simple Bin for Numeric Features
+  mutate(across(c(INTR_GBS_COMP_CNT, INTR_WH_COMP_CNT, INTR_15IGO_INDIV_CNT,
+                  INTR_153QH_COMP_CNT, #INTR_15ANP_COMP_CNT, INTR_15ITT_COMP_CNT, 
+                  INTR_15MFT_COMP_CNT, INTR_15MHW_COMP_CNT, INTR_15PHW_COMP_CNT, 
+                  INTR_15STS_COMP_CNT, INTR_15ANP_INDIV_CNT, INTR_15IGO_INDIV_CNT,
+                  INTR_20B2P_COMP_CNT, INTR_20A0W_COMP_CNT, INTR_20APO_COMP_CNT,
+                  INTR_20A0O_COMP_CNT, INTR_20B17_COMP_CNT, INTR_20AU4_COMP_CNT, 
+                  INTR_20B14_COMP_CNT, INTR_20B2L_COMP_CNT, INTR_20A0K_COMP_CNT, 
+                  INTR_20GKU_COMP_CNT, INTR_20BEQ_COMP_CNT,
+                  UT15_OFFER_153QH_COMP_CNT_60DAYS, UT15_OFFER_15IGO_COMP_CNT_60DAYS, UT15_OFFER_15MHW_COMP_CNT_60DAYS), 
+                binary_bin)) %>%
+  set_missing(list(-1L, "NULL")) %>%
+  mutate(across(where(is.character), name_cleaner))
+  
+
+# 1.2) BINNING: One-Hot-Encoding ---------------------------------------------------
+# once all the binning is done, we can one-hot encode our new fields
+input <- data %>%
+  dummify(maxcat = 10)
+
+# bring UT10 target back in
+input <- input %>%
+  inner_join(raw %>% 
+               select(INBOUND_MARKETING_INTERACTION_KEY, UT_LVL_10_CD))
 
 
-# 1.2) Clean up other categoricals ------------------------------------------------------
-# let's grab the other categorical variables that we didn't have to reclassify
-# we still need to one hot encode / treat NULLs so we will do that here
-# then merge with the cat_box table back into the main modeling df
-cat_keep <- data %>%
-  select(INBOUND_MARKETING_INTERACTION_KEY, where(is.character)) %>%
-  select(INBOUND_MARKETING_INTERACTION_KEY, !any_of(bin_ref %>% pull(VAR))) %>%
-  select(-UT_LVL_10_CD, -UT_LVL_10_DSCR) %>%
-  mutate(across(where(is.character), ~ coalesce(.x, 'NULL')))
+# 1.3) Mapping Updated Pipe Fields (lag / same q) -------------------------
 
 
-# 1.3) Create categorical encoded tbl -------------------------------------
-# join by INBOUND MARKETING KEY
-# this now has all the categorical features set as binary flags
-# so the next step is to merge back into main input table
-
-cat_box_wide <- cat_box %>%
-  gather(var, val, -INBOUND_MARKETING_INTERACTION_KEY) %>%
-  unite("var", var, val, sep = "_") %>%
-  mutate(var = str_replace_all(var, ' ', '_'),
-         var = toupper(var),
-         dummy = 1) %>%
-  spread(var, dummy, fill = 0)
-
-cat_keep_wide <- cat_keep %>%
-  gather(var, val, -INBOUND_MARKETING_INTERACTION_KEY) %>%
-  unite("var", var, val, sep = "_") %>%
-  mutate(var = str_replace_all(var, ' ', '_'),
-         var = toupper(var),
-         dummy = 1) %>%
-  spread(var, dummy, fill = 0)
-
-cat_final <- cat_box_wide %>%
-  inner_join(cat_keep_wide)
-
-# vector of names
-cat_names <- cat_final %>%
-  select(-INBOUND_MARKETING_INTERACTION_KEY) %>%
+# USE OBJECTS FROM 'RLM & Same Q Pipe Update 2.RData'
+# make vector of current features in input table
+# we will need this to figure out which ones to replace with the ones from test_df
+originalField <- input %>%
   names()
 
-# 1.4) create input table (version 1) -------------------------------------
-# vector of fields we want to replace with our new bins
-cat_cleaner <- tibble(FIELD = c(cat_keep %>% names, cat_box %>% names)) %>%
-  filter(FIELD != "INBOUND_MARKETING_INTERACTION_KEY") %>%
-  distinct() %>%
-  pull(FIELD) 
-
-# drop raw binned fields 
-# map in new bins!
-# use this for feature selection
-input_master <- data %>%
-  select(!all_of(cat_cleaner)) %>%
-  mutate(S1_CLIENT_TEAMS = coalesce(S1_CLIENT_TEAMS, "S2")) %>%
-  inner_join(cat_final) %>%
-  mutate(across(where(is.numeric), coalesce, -1)) 
+# drop fields that were updated in pipe_SUBBED & replace them with the new values 
+# use RLM_OPTY vector to flag RLM sourced opportunities
+input <- input %>%
+  select(!contains('WON_DTL_REVN')) %>%
+  select(!any_of(updatedField)) %>%
+  mutate(INBOUND_MARKETING_INTERACTION_KEY = INBOUND_MARKETING_INTERACTION_KEY %>% as.character) %>%
+  left_join(pipe_SUBBED) %>%
+  left_join(pipe_lag) %>%
+  mutate(RLM_OPTY_FLG = case_when(INBOUND_MARKETING_INTERACTION_KEY %in% RLM_opty ~ 1,
+                                  T ~ 0)) %>%
+  select(sort(current_vars())) %>%
+  select(INBOUND_MARKETING_INTERACTION_KEY, UT_LVL_10_CD, RLM_OPTY_FLG, everything())
 
 
-# rm(cat_box, cat_box_wide, cat_final, cat_keep, cat_keep_wide, jobs, data, bin_ref)
+# 1.4) NUMERIC: Additional Feature Engineering ---------------------------------
+# Update Pipe WON DTL REV to be a percentage of total WON DTL REV
+# Hypothesis: company level breakdown of revenue more meaningful than raw numbers
+# Keep ALL_WON_DTL_REV as is to keep scale of client / indiv
+# No need to do a similar normalization for INDIVs (very sparse / correlated)
 
-# junk --------------------------------------------------------------------
+input <- input %>%
+  mutate(across(!starts_with('ALL_WON_DTL_REV') & 
+                  contains('WON_DTL') & 
+                  contains('COMP') & 
+                  !ends_with('_FLG'), 
+                ~ (./ ALL_WON_DTL_REVN_COMP_SUM_C) %>% coalesce(0) ))
 
 
-input <- input_master %>%
-  select(INBOUND_MARKETING_INTERACTION_KEY, 
-         all_of(selector_Final %>%
-                  filter(FINAL == 'KEEP') %>%
-                  pull(FIELD)))
 
-catInput <- data %>%
-  select(INBOUND_MARKETING_INTERACTION_KEY, UT_LVL_10_CD, BUS_AREA_NAME, COMP_REV_SEG, EMP_CNT_SEG, INDUSTRY, 
-         JOB_FUNCTION, MARKET_INTERACTION, PARENT_ASSET_BUYERS_JOURNEY,
-         UT_LVL_30_CD_INTENT_NEW, UT_LVL_20_CD_INTENT_NEW, UT_LVL_15_CD_INTENT_NEW,
-         CHANNEL_NAME, CHANNEL_TYPE, IBM_GBL_IMT_DSCR, PROGRAM_NAME)
+# 2.1) Prep BORUTA --------------------------------------------------------
+boruta_INPUT <- input %>%
+  select(!contains("ALL_OTHER")) %>%
+  select(!starts_with("BJ_")) %>%
+  select(!starts_with('CHN_NM')) %>%
+  select(!starts_with('CHN_T')) %>%
+  select(!contains('WON_DTL_REVN_INDIV')) %>%
+  select(!contains('WON_LEAD_COMP')) %>%
+  select(!contains('WON_LEAD_INDIV')) %>%
+  select(!starts_with('PARENT_ASSET_BUYERS')) %>%
+  select(!starts_with('UT_LVL_20_CD_INTENT')) %>%
+  select(!starts_with('UT_LVL_30_CD_INTENT')) %>%
+  select(!matches('INTR_.*FLG')) %>%
+  select(-EXT_DTL_REVN_USD, -INDEX, -NEWCO_FLG_BASE, 
+         -P_SCORE_NEW_FLAG, -RS_MATCH_FLAG, -AVG_RESP_DAYS)
+  
+# save.image("~/Documents/Projects/MQL Modeling/UT10 Model/xgb6 prep ws.RData")
+# 2.2) Run BORUTA ---------------------------------------------------------
+test <- boruta_INPUT %>%
+  filter(RLM_OPTY_FLG == 1) %>%
+  mutate(UT_LVL_10_CD = UT_LVL_10_CD %>% as.factor) %>%
+  select(-INBOUND_MARKETING_INTERACTION_KEY, -RLM_OPTY_FLG)
+
+boruta_RLM <- Boruta(UT_LVL_10_CD ~ ., 
+                     data = test, 
+                     maxRuns = 11,
+                     doTrace = 2)
+
+RLM_stats <- attStats(boruta_RLM) %>%
+  mutate(FIELD = row.names(.)) %>%
+  as_tibble() %>%
+  arrange(-medianImp) %>%
+  select(FIELD, everything())
+
+
+
