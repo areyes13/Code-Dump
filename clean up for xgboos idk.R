@@ -83,6 +83,45 @@ pipe_lag <- read_delim("~/Documents/Projects/MQL - NFS Transfers/MQL_MODELING_MA
 # gotta get the URN and YQ fields to map in some of our new pipe delta fields
 id_fields <- read_csv('INBOUND ID FIELDS 20210729.csv')
 
+
+# load Praveen's new indiv interaction trend features ---------------------------
+intr_trend <- read_csv('60TO120Trends.csv') %>% #read_csv('30TO60Trends.csv') %>%
+  select(-URN_IDM_INDIV_ACTV, -INTERACTION_TS,-NEW_CONTACT_FLG, 
+         -DV_IS_OPEN, -UT_LVL_10_CD, -UT_LVL_10_DSCR) %>%
+  select(!starts_with('BJ_')) %>%
+  select(!starts_with('PAG')) %>%
+  select(!starts_with('CHN_')) %>%
+  select(!starts_with('INDIV_CNT')) %>%
+  mutate(INBOUND_MARKETING_INTERACTION_KEY = INBOUND_MARKETING_INTERACTION_KEY %>% as.character) %>%
+  set_missing(list(-1L, "NULL")) %>% 
+  select(INBOUND_MARKETING_INTERACTION_KEY, ends_with('_TREND_CATG')) %>%
+  mutate(across(everything(), ~replace(., . ==  -1 , "NULL"))) %>%
+  unite(col = "UT10_OFFER_INDIV_CNT_TREND_PATTERN", contains('10'), remove = F) %>%
+  unite(col = "UT15_OFFER_INDIV_CNT_TREND_PATTERN", contains('15'), remove = F) %>%
+  mutate(UT10_OFFER_INDIV_CNT_TREND_PATTERN = case_when(UT10_OFFER_INDIV_CNT_TREND_PATTERN == paste(rep("NULL", 11), collapse = "_") ~ "ALL_NULL",
+                                                        UT10_OFFER_INDIV_CNT_TREND_PATTERN == paste(rep("U", 11), collapse = "_") ~ "ALL_UP",
+                                                        UT10_OFFER_INDIV_CNT_TREND_PATTERN == paste(rep("D", 11), collapse = "_") ~ "ALL_DOWN",
+                                                        T ~ "1PLUS_DIFF_UT"),
+         UT15_OFFER_INDIV_CNT_TREND_PATTERN = case_when(UT15_OFFER_INDIV_CNT_TREND_PATTERN == paste(rep("NULL", 35), collapse = "_") ~ "ALL_NULL",
+                                                        UT15_OFFER_INDIV_CNT_TREND_PATTERN == paste(rep("U", 35), collapse = "_") ~ "ALL_UP",
+                                                        UT15_OFFER_INDIV_CNT_TREND_PATTERN == paste(rep("D", 35), collapse = "_") ~ "ALL_DOWN",
+                                                        T ~ "1PLUS_DIFF_UT") ) %>%
+  select(!starts_with("UT15_")) %>% # pretty much identical patterns as UT10... see the pattern features generated
+  select(!matches('MISC|PROJ2|IGHF')) %>%
+  mutate(across(starts_with('UT'), as.factor)) %>%
+  dummify(maxcat = 4)
+
+# intr_counter <- intr_trend %>% 
+#   select(INBOUND_MARKETING_INTERACTION_KEY, ends_with('_TREND_CATG')) %>%
+#   mutate(across(starts_with('UT'), as.factor)) %>%
+#   summarise(across(starts_with('UT'), n_distinct)) %>%
+#   gather(var, val) 
+
+
+
+
+
+
 # 1.0) BINNING: REF TABLE --------------------------------------------
 # use the excel workbook where bins are already defined by conversion rates
 # we can then load it in and create our dummy code for binning 
@@ -213,7 +252,7 @@ data <- raw %>%
                 binary_bin)) %>%
   set_missing(list(-1L, "NULL")) %>%
   mutate(across(where(is.character), name_cleaner))
-  
+
 
 # 1.2) BINNING: One-Hot-Encoding ---------------------------------------------------
 # once all the binning is done, we can one-hot encode our new fields
@@ -278,18 +317,24 @@ boruta_INPUT <- input %>%
   select(!starts_with('UT_LVL_30_CD_INTENT')) %>%
   select(!matches('INTR_.*FLG')) %>%
   select(-EXT_DTL_REVN_USD, -INDEX, -NEWCO_FLG_BASE, 
-         -P_SCORE_NEW_FLAG, -RS_MATCH_FLAG, -AVG_RESP_DAYS)
-  
-# save.image("~/Documents/Projects/MQL Modeling/UT10 Model/xgb6 prep ws.RData")
+         -P_SCORE_NEW_FLAG, -RS_MATCH_FLAG, -AVG_RESP_DAYS) %>%
+  inner_join(intr_trend)
+
+# save.image("xgb6 prep ws.RData")
+
+
+
 # 2.2) Run BORUTA ---------------------------------------------------------
 test <- boruta_INPUT %>%
   filter(RLM_OPTY_FLG == 1) %>%
   mutate(UT_LVL_10_CD = UT_LVL_10_CD %>% as.factor) %>%
   select(-INBOUND_MARKETING_INTERACTION_KEY, -RLM_OPTY_FLG)
 
+# rm(list = setdiff(ls(), c('test')))
+
 boruta_RLM <- Boruta(UT_LVL_10_CD ~ ., 
                      data = test, 
-                     maxRuns = 11,
+                     maxRuns = 15,
                      doTrace = 2)
 
 RLM_stats <- attStats(boruta_RLM) %>%
@@ -298,5 +343,5 @@ RLM_stats <- attStats(boruta_RLM) %>%
   arrange(-medianImp) %>%
   select(FIELD, everything())
 
-
+# save.image("xgb6 boruta output.RData")
 
