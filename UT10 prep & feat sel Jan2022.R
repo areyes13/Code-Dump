@@ -398,5 +398,5 @@ combo <- bind_rows(chunk_stats_CNDP %>%
                             INDEX = row_number())) %>%
   distinct(FIELD, .keep_all = T) 
 
-
+save.image('boruta FULL output.RData')
 
